@@ -1,0 +1,197 @@
+---
+title: "Machine Learning Final Project"
+author: "Charles Eliot"
+date: "May 8, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Machine Learning Final Project
+
+## Abstract
+
+We report on a predictive model to perform activity recognition based on data obtained from a weight lifting exercise. The data were derived from the study by [Velloso et al](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf). The experiments and dataset are described   [here](http://groupware.les.inf.puc-rio.br/har#dataset).
+In the original study subjects were fitted with movement sensors. The subjects then performed weight-lifting exercises with size types of action, labeled A, B, C, D, and E. The first action, A, represented optimal form for the exercise. The other four actions represented different types of bad lifting form (pushing the elbows forward, partial lifts, and swinging from the hips). The goal of the project was to develop a predictive machine model to derive the action class from the sensor data. 
+
+The final model is a stacked model based on three classification models, combined by simple majority voting. The final model demonstrated 0.9895 accuracy (95% CI = 0.9858-9925) against the final validation data partition, and correctly identified 20/20 of the scored tests.
+
+## Data Acquisition and Pre-Processing
+
+Data were obtained as two CSV file downloaded from the Machine Learning course site. The larger file contained data for training and testing the data models, and the smaller file contained 20 test records for final scored predictions.
+
+```{r eval=FALSE}
+training.data.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testing.data.url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training.data.file = "training.csv"
+testing.data.file = "testing.csv"
+
+log.file = "activities.log"
+
+getDataFile <- function(url, filename, logfilename){
+  if (!file.exists(filename)){
+    download.file(url, filename)
+    msg <- sprintf("%s downloaded at %s", filename, Sys.time())
+    con <- file(logfilename, "at")
+    writeLines(msg, con)
+    close(con)
+    print(msg)
+  }
+}
+
+getDataFile(training.data.url, training.data.file, log.file)
+getDataFile(testing.data.url, testing.data.file, log.file)
+
+orig.training <- read.csv(training.data.file, stringsAsFactors = FALSE, na.string=c("NA", "#DIV/0!"))
+final.testing <- read.csv(testing.data.file, stringsAsFactors = FALSE, na.string=c("NA", "#DIV/0!"))
+```
+
+To limit the data to useful predictors, identifier variables and variable with missing values were removed. This data cleansing reduced the dataset from 160 variables to 53. The same manipulations were done for both the training and final scoring datasets.
+
+```{r eval=FALSE}
+cols <- names(orig.training) %in% c(
+  "X", 
+  "user_name", 
+  "raw_timestamp_part_1", 
+  "raw_timestamp_part_2",
+  "cvtd_timestamp",
+  "new_window",
+  "num_window",
+  "classe",
+  "problem_id"
+  )
+
+predictors <- orig.training[!cols]
+final.testing.predictors <- final.testing[!cols]
+
+for (i in 1:ncol(predictors)){
+  predictors[,i] <- as.numeric(predictors[,i])
+}
+
+for (i in 1:ncol(predictors)){
+  final.testing.predictors[,i] <- as.numeric(final.testing.predictors[,i])
+}
+
+# Step 2: keep only variables that have a value for every observation
+
+complete.cols <- as.character()
+
+for (i in 1:ncol(predictors)){
+  if (all(!is.na(predictors[,i]))){
+    complete.cols <- c(complete.cols, names(predictors)[i])
+  }
+}
+
+cols.mask <- names(predictors) %in% complete.cols
+predictors <- predictors[cols.mask]
+final.testing.predictors <- final.testing.predictors[cols.mask]
+predictor.count <- ncol(predictors)
+
+# Step 3: combine predictors + predicted value into one data frame (still without
+# identifier variables)
+
+orig.training.clean <- data.frame(predictors, classe = orig.training$classe)
+```
+## Data Partitioning
+
+The training dataset (19622 records) was partitioned into three segments:
+- 60% for model training (11776 records)
+- 20% for model testing during training (3923 records)
+- 20% for validation of the final stacked model (3923 records)
+
+```{r eval=FALSE}
+set.seed(321)
+inTrain <- createDataPartition(y=orig.training.clean$classe, p=0.6, list=FALSE)
+training <- orig.training.clean[inTrain,]
+testing <- orig.training.clean[-inTrain,]
+
+inValidation <- createDataPartition(y=testing$classe, p=0.5, list=FALSE)
+validation <- testing[inValidation,]
+testing <- testing[-inValidation,]
+```
+## Model Selection
+
+Because this is a classification problem, tree-based models were prefered. Four models were built based on the **training** partition, and assessed for accuracy based on predictions against the **testing** partition.
+
+Model       | Accuracy    | Resampling
+------------|-------------|----------------
+rf          | 0.989294    | 3 bootstraps
+rpart       | 0.491461    | 25 bootstraps
+gbm         | 0.960489    | 3 bootstraps
+ranger      | 0.988529    | 3 bootstraps
+
+Centering, scaling and Box-Cox pre-processing had no discernible effect on the accuracy of the gbm model. No pre-processing was used in the final model.
+
+Because of its low accuracy (49%) compared to the other models, the rpart model was dropped from the final stacked mix of models.
+
+The following code snippet illustrates how the models were built. Each model used a separate random number seed. The call to trainControl restricted the number of bootstrap resamplings.
+
+```{r eval=FALSE}
+fitcontrol <- trainControl(number = 3)
+set.seed(456)
+
+fit.gbm.3 <- train(classe ~ ., method = "gbm", data = training, trControl = fitcontrol)
+
+varImp(fit.gbm.3)
+confusionMatrix(predict(fit.gbm.3,newdata=testing),testing$classe)
+```
+
+## Stacking to Get the Final Model
+
+The final model was obtained by stacking results from running the rf, gbm, and ranger models, then selecting the final prediction by majority vote between the three models. This produced a final model with 0.9895 accuracy (95% CI = 0.9858-9925) when tested against the **validation** data partition.
+
+This final model correctly predicted 100% (20/20) of the final scoring test cases.
+
+```{r eval=FALSE}
+rf.preds <- predict(fit.rf, newdata=validation)
+gbm.preds <- predict(fit.gbm.3, newdata=validation)
+ranger.preds <- predict(fit.ranger, newdata=validation)
+
+predictionsDF <- data.frame(rf=rf.preds, 
+                            gbm=gbm.preds,
+                            ranger=ranger.preds
+                            )
+
+predictions <- apply(predictionsDF,1,function(x){
+    winning.total = 0
+    
+    if (sum(x=="A") > winning.total)
+    {
+      winning.total <- sum(x=="A")
+      winner = "A"
+    }
+    
+    if (sum(x=="B") > winning.total)
+    {
+      winning.total <- sum(x=="B")
+      winner = "B"
+    }
+    
+    if (sum(x=="C") > winning.total)
+    {
+      winning.total <- sum(x=="C")
+      winner = "C"
+    }
+    
+    if (sum(x=="D") > winning.total)
+    {
+      winning.total <- sum(x=="D")
+      winner = "D"
+    }
+    
+    if (sum(x=="E") > winning.total)
+    {
+      winning.total <- sum(x=="E")
+      winner = "E"
+    }
+  
+    return(winner)
+})
+
+predictions <- factor(predictions, levels=c("A","B","C","D","E"))
+
+confusionMatrix(predictions, validation$classe)
+```
